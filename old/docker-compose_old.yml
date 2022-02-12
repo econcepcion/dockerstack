@@ -1,0 +1,250 @@
+version: "3.3"
+
+services:
+  #########################################################################
+  ##############   MYSQL
+  #########################################################################
+  db:
+    container_name: mysql
+    image: mysql:5.7
+    volumes:
+      - wp_db:/var/lib/mysql/
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: somewordpress
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+    networks:
+      - wp
+
+  #########################################################################
+  ##############   WP
+  #########################################################################
+  wordpress:
+    depends_on:
+      - db
+    container_name: wordpress
+    image: wordpress:latest
+    volumes:
+      - ./wp6:/var/www/html
+    ports:
+      - 8000:80
+    restart: always
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    networks:
+      - wp
+      - webgateway
+      - web
+    labels:
+      #- traefik.enable=true
+      # - traefik.docker.network=web
+      # - traefik.backend=xavki
+      # - traefik.frontend.rule=Host:wp6.localhost
+      # - traefik.port=80
+
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.middlewares.yourdomain-https.redirectscheme.scheme=https
+      - traefik.http.routers.yourdomain-http.entrypoints=web
+      - traefik.http.routers.yourdomain-http.rule=Host(`wp6.localhost`, `www.wp6.localhost`)
+      #- traefik.http.routers.yourdomain-http.middlewares=yourdomain-https@docker
+      #- traefik.http.routers.yourdomain.middlewares=secureHeader@file
+      - traefik.http.routers.yourdomain.entrypoints=websecure
+      - traefik.http.routers.yourdomain.rule=Host(`wp6.localhost`, `www.wp6.localhost`)
+      - traefik.http.routers.yourdomain.tls=true
+      - traefik.http.routers.yourdomain.tls.options=default
+      - traefik.http.routers.yourdomain.tls.certresolver=mytlschallenge
+
+  #########################################################################
+  ##############   PHPMYADMIN
+  #########################################################################
+  phpmyadmin:
+    depends_on:
+      - db
+    image: phpmyadmin/phpmyadmin
+    restart: always
+    ports:
+      - 7777:80
+    environment:
+      PMA_HOST: db
+      MYSQL_ROOT_PASSWORD: password
+    labels:
+      - traefik.docker.network=traefik
+      - traefik.backend=phpmyadmin
+      - traefik.frontend.rule=Host:phpmyadmin.localhost
+      - traefik.port=80
+    networks:
+      - wp
+      - webgateway
+
+  #########################################################################
+  ##############   TRAEFIK
+  #########################################################################
+  # traefik:
+  #   image: traefik
+  #   command: --web --docker --docker.domain=docker.localhost --logLevel=DEBUG
+  #   ports:
+  #     - "80:80"
+  #     - "8080:8080"
+  #     - "443:443"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - /dev/null:/traefik.toml
+  #   networks:
+  #     - webgateway
+
+  traefik:
+    image: traefik:v2.2
+    container_name: traefik
+    command:
+      # - --log.level=DEBUG
+      # # API
+      # - --api.insecure=true
+      # - --api.dashboard=true
+      # - --api.debug=true
+      # # Providers
+      # - --providers.docker=true
+      # - --providers.docker.exposedbydefault=true
+      # - --providers.docker.network=webgateway
+      # # Entry Points
+      # - --entrypoints.web.address=:80
+
+      - --global.sendAnonymousUsage
+      #- --log.level=DEBUG
+      - --log.filePath=/var/log/traefik.log
+      - --accesslog=true
+      - --accesslog.filePath=/var/log/access.log
+      - --accesslog.bufferingsize=100
+      - --api.insecure=true
+        #- --api=true
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=true
+      - --providers.file.directory=/configuration
+      - --providers.file.filename=dynamic_conf.toml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.mytlschallenge.acme.tlschallenge=true
+        #- --certificatesresolvers.mytlschallenge.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.mytlschallenge.acme.email=postmaster@yourdomain.com
+      - --certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json
+
+    ports:
+      - 80:80
+      - 8080:8080
+      - 443:443
+    volumes:
+      - ./letsencrypt:/letsencrypt
+      - ./configuration:/configuration
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - webgateway
+    # labels:
+    #   - traefik.enable=true
+    #  #- traefik.http.routers.api.rule=Host('monitor.localhost')
+
+  #########################################################################
+  ##############   PORTAINER
+  #########################################################################
+  portainer:
+    image: portainer/portainer
+    command: -H unix:///var/run/docker.sock
+    restart: always
+    ports:
+      - 9000:9000
+      - 8800:8000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+
+  #########################################################################
+  ##############   PROMETHEUS
+  #########################################################################
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    networks:
+      - inbound
+    deploy:
+      labels:
+        - "traefik.http.routers.prometheus.rule=Host(`prometheus.localhost`)"
+        - "traefik.http.routers.prometheus.service=prometheus"
+        - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+        - "traefik.docker.network=inbound"
+      placement:
+        constraints:
+          - node.role==manager
+      restart_policy:
+        condition: on-failure
+  #########################################################################
+  ##############   GRAFANA
+  #########################################################################
+  grafana:
+    image: grafana/grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring
+    networks:
+      - inbound
+    user: "104"
+    deploy:
+      labels:
+        - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+        - "traefik.http.routers.grafana.service=grafana"
+        - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+        - "traefik.docker.network=inbound"
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+#########################################################################
+##############   NETWORKS
+#########################################################################
+networks:
+  web:
+  wp:
+  webgateway:
+    driver: bridge
+
+#########################################################################
+##############   VOLUMES
+#########################################################################
+volumes:
+  wp_db:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: /Users/edwardconcepcion/docker/STACK/db
+  wp_statics:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: /Users/edwardconcepcion/docker/STACK/stats
+  portainer_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: /Users/edwardconcepcion/docker/STACK/portainer
+  prometheus_data: {}
+  grafana_data: {}
